@@ -27,6 +27,7 @@ import time
 RATE = 44100
 FRAME_SIZE = 16  # In bits
 PERIOD = 32  # Num. frames in chunk.
+CHUNKS_PER_SEC = RATE / PERIOD
 
 frequencies = {  # Parsed from http://www.phy.mtu.edu/~suits/notefreqs.html
     'C0': 16.35,
@@ -136,52 +137,60 @@ c_major_scale = ['C', 'D', 'E', 'F', 'G', 'A', 'B']
 def init_pcm():
     import alsaaudio as alsa
     pcm = alsa.PCM(type=alsa.PCM_PLAYBACK,
-                   mode=alsa.PCM_NONBLOCK)
+                   mode=alsa.PCM_NORMAL)
     pcm.setchannels(1)
     return pcm
 
-position = 0
+def synth_sine(chunk_i, note):
+    'Return a chunk of sinewave data for a chunk of time.'
+    freq = frequencies[note]
+    ticks = xrange((chunk_i - 1) * PERIOD, chunk_i * PERIOD)
+    frames = array.array('h', [int(2 ** 12 * math.sin(2 * math.pi * freq * tick * 1.0 / RATE)) for tick in ticks])
+    return frames
 
-def synth_sine(freq, duration):
-    'Returns an array of chunks.'
-    num_samples = int(duration * RATE)
-    data = array.array('h', [int(2 ** 14 * math.sin(position + 2 * math.pi * freq * sample * 1.0/RATE)) for sample in xrange(num_samples)])
-    return data
+def play_chunk(pcm, chunk):
+        pcm.write(chunk.tostring())
 
-def play_frames(pcm, frames):
-    num_frames = len(frames) / PERIOD
-    for frame_i in xrange(num_frames):
-        i = frame_i * PERIOD
-        pcm.write(frames[i : i + PERIOD].tostring())
-
-def bass_line():
-    note_duration = 1
-    data = array.array('h')
-    for i in xrange(10):
-        note = c_major_scale[random.randint(1, 6)]
-        octave = random.randint(2,3)
-        freq = frequencies[note + str(octave)]
-        data.extend(synth_sine(freq, note_duration))
-    return data
-
-def random_solo():
-    note_duration = 0.1
-    data = array.array('h')
-    for i in xrange(100):
-        octave = random.randint(1,6)
-        note = c_major_scale[random.randint(0, 6)]
-        freq = frequencies[note + str(octave)]
-        data.extend(synth_sine(freq, note_duration))
-    return data
+def play(pcm, generators, length_sec):
+    for i in xrange(length_sec * CHUNKS_PER_SEC):
+        time = float(i) / CHUNKS_PER_SEC
+        chunk = array.array('h', [0 for x in xrange(PERIOD)])
+        for generator in generators:
+            note = generator(time)
+            if note:
+                subchunk = synth_sine(i, note)
+                for chunk_i in xrange(PERIOD):
+                    chunk[chunk_i] = chunk[chunk_i] + subchunk[chunk_i]
+        play_chunk(pcm, chunk)
 
 if __name__ == '__main__':
-    print 'Starting pcm'
     pcm = init_pcm()
-    print 'Done.'
-    print 'Creating synth data:', time.time()
-    data_bass = bass_line()
-    data_solo = random_solo()
-    data = array.array('h', [data_solo[i] + data_bass[i] for i in xrange(len(data_bass))])
-    print 'Done.', time.time()
+    # Randomly-generated music:
+    duration = 40
 
-    play_frames(pcm, data)
+    bass_notes = [c_major_scale[random.randint(0, 6)] + str(random.randint(2,3)) for i in xrange(duration)]
+    print bass_notes
+    def bass_line(time):
+        if time >= duration:
+            return None
+        return bass_notes[int(time)]
+    def melody(time):
+        time = time % 7
+        if time >= 7:
+            return None
+        if time <= 4:
+            return c_major_scale[int(time)] + '4'
+        else:
+            return c_major_scale[7 - int(time)] + '4'
+    note_duration = 0.1
+    solo_notes = [c_major_scale[random.randint(0, 6)] + str(random.randint(1,6)) for i in xrange(int(duration / note_duration))]
+    print solo_notes
+    def random_solo(time):
+        return solo_notes[int(time / note_duration)]
+
+    play(pcm, [random_solo], 3)
+    from threading import Thread
+    t = Thread(target = lambda: play(pcm, [melody, bass_line, random_solo], duration))
+    t.start()
+    time.sleep(duration)
+    play(pcm, [bass_line], 5)
